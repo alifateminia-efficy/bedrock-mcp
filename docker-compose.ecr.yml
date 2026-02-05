@@ -1,0 +1,26 @@
+services:
+  bedrock-mcp:
+    image: ${ECR_URI}:${IMAGE_TAG:-latest}
+    container_name: bedrock-mcp-server
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - BEDROCK_KB_ID=${BEDROCK_KB_ID}
+      - AWS_REGION=${AWS_REGION:-eu-west-1}
+      - SERVER_HOST=0.0.0.0
+      - SERVER_PORT=8000
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    env_file:
+      - .env
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

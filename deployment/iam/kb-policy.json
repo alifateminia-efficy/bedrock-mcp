@@ -1,0 +1,12 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:Retrieve"
+      ],
+      "Resource": "arn:aws:bedrock:eu-west-1:YOUR_ACCOUNT_ID:knowledge-base/YOUR_KB_ID"
+    }
+  ]
+}
