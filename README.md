@@ -6,21 +6,28 @@ A FastMCP-based HTTP server that connects to AWS Bedrock Knowledge Base, designe
 
 - FastMCP server with HTTP/SSE transport for claude.ai integration
 - AWS Bedrock Knowledge Base integration via boto3
+- **Microsoft Entra ID (Azure AD) SSO authentication** - enterprise-ready OAuth 2.0 authentication
 - Docker containerization with ECR deployment support
 - Health check endpoint for monitoring and load balancer integration
 - Structured JSON logging with structlog
 - Comprehensive error handling and validation
 - IAM role-based authentication (no hardcoded credentials)
 - CORS support for claude.ai domains
+- JWT token validation with JWKS caching
+- User identity tracking for audit logging
 
 ## Architecture
 
 ```
-Claude.ai Web → Load Balancer (SSL) → EC2 (Docker) → AWS Bedrock KB
+Claude.ai Web → Azure AD OAuth → Load Balancer (SSL) → EC2 (Docker) → AWS Bedrock KB
+                      ↓                                        ↑
+                  JWT Token                           IAM Role Authentication
 ```
 
+- **Azure AD**: Handles user authentication via OAuth 2.0 (optional, disabled by default)
+- **Claude.ai**: Manages OAuth flow and sends JWT bearer tokens with requests
 - **Load Balancer**: Handles SSL termination and forwards to EC2:8000
-- **EC2 Instance**: Runs Docker container with FastMCP server
+- **EC2 Instance**: Runs Docker container with FastMCP server that validates JWT tokens
 - **IAM Role**: Provides permissions for Bedrock KB and ECR access
 - **ECR**: Hosts Docker images for deployment
 
@@ -33,6 +40,9 @@ Claude.ai Web → Load Balancer (SSL) → EC2 (Docker) → AWS Bedrock KB
   - ECR repository access
   - EC2 instance with IAM role
   - Load Balancer with SSL certificate
+- **Optional - For Authentication**:
+  - Microsoft Azure subscription with Entra ID (Azure AD) access
+  - Permissions to create App Registrations in Azure AD
 
 ## Quick Start
 
@@ -78,7 +88,7 @@ curl http://localhost:8000/health
 # Install development dependencies
 pip install -r requirements-dev.txt
 
-# Run tests
+# Run all tests
 pytest tests/ -v
 
 # Run tests with coverage
@@ -86,6 +96,10 @@ pytest tests/ --cov=src --cov-report=html
 
 # Run specific test file
 pytest tests/test_bedrock_client.py -v
+pytest tests/test_auth.py -v
+
+# Run only auth tests
+pytest tests/test_auth.py -v --cov=src.auth
 ```
 
 ## AWS Infrastructure Setup
@@ -213,9 +227,100 @@ curl http://localhost:8000/health
 curl https://your-load-balancer-url/health
 ```
 
+## Authentication (Microsoft Entra ID)
+
+The server supports optional Microsoft Entra ID (Azure AD) Single Sign-On authentication for enterprise deployments. **Authentication is disabled by default** for backward compatibility.
+
+### Azure AD Setup
+
+#### 1. Create App Registration in Azure Portal
+
+```
+Azure Portal → Microsoft Entra ID → App Registrations → New Registration
+```
+
+**Settings:**
+- **Name**: `Bedrock MCP Server` (or your preferred name)
+- **Supported account types**: Single tenant (or multi-tenant based on needs)
+- **Redirect URI**:
+  - Platform: Web
+  - URI: `https://claude.ai/api/mcp/auth_callback`
+
+**Record these values:**
+- Application (client) ID → Use for `ENTRA_CLIENT_ID`
+- Directory (tenant) ID → Use for `ENTRA_TENANT_ID`
+
+#### 2. Configure API Permissions
+
+```
+App Registration → API Permissions → Add a permission
+```
+
+- Microsoft Graph → Delegated permissions → `User.Read`
+- Click "Grant admin consent" if required by your organization
+
+#### 3. Create Client Secret
+
+```
+App Registration → Certificates & secrets → New client secret
+```
+
+- Description: `Claude MCP Connector`
+- Expiration: 24 months (or per your security policy)
+- **Copy the secret value** - you'll configure this in Claude.ai (NOT in your server .env)
+
+#### 4. Configure Token Settings (Optional)
+
+```
+App Registration → Token configuration → Add optional claims
+```
+
+Add to Access tokens:
+- `email`
+- `preferred_username`
+
+These will be used for audit logging.
+
+### Enable Authentication
+
+Update your `.env` file:
+
+```env
+# Enable authentication
+ENABLE_AUTH=true
+
+# Azure AD configuration
+ENTRA_TENANT_ID=your-tenant-id-guid
+ENTRA_CLIENT_ID=your-client-id-guid
+
+# Optional - defaults to ENTRA_CLIENT_ID if not set
+# ENTRA_AUDIENCE=api://your-client-id
+```
+
+Redeploy the server after updating the configuration.
+
+### Authentication Flow
+
+1. User adds connector in Claude.ai with OAuth credentials
+2. Claude.ai redirects user to Azure AD login
+3. User authenticates with Azure AD credentials
+4. Azure AD issues JWT access token to Claude.ai
+5. Claude.ai sends `Authorization: Bearer <token>` with every request
+6. Server validates JWT signature, claims, and expiration
+7. Request is processed with user context logged
+
+### Security Features
+
+- **JWT Signature Validation**: Verifies token authenticity using Azure AD public keys (RS256)
+- **Claims Verification**: Validates issuer, audience, expiration, and not-before claims
+- **JWKS Caching**: Caches Azure AD signing keys for 1 hour to improve performance
+- **Health Endpoint Exception**: `/health` endpoint always accessible without authentication
+- **User Identity Logging**: Logs authenticated user for audit trails (never logs tokens)
+- **Backward Compatible**: Auth disabled by default; existing deployments unaffected
+
 ## Claude.ai Integration
 
-### Connect to Claude.ai
+### Connect to Claude.ai (Without Authentication)
 
 1. Go to [claude.ai](https://claude.ai) → Settings → Integrations → MCP Servers
 2. Click "Add Server"
@@ -223,6 +328,39 @@ curl https://your-load-balancer-url/health
    - **Name**: Bedrock Knowledge Base
    - **URL**: `https://your-load-balancer-url/sse` or `https://your-load-balancer-url/`
 4. Connection established
+
+### Connect to Claude.ai (With OAuth Authentication)
+
+**Prerequisites:**
+1. Complete Azure AD Setup (create App Registration, get Client ID and Secret)
+2. Ensure `ENABLE_AUTH=true` and `ENTRA_TENANT_ID` configured in your server's `.env`
+3. Deploy server to production (HTTPS required for OAuth2)
+
+**Configuration Steps:**
+
+1. Go to [claude.ai](https://claude.ai) → Settings → Integrations → MCP Servers
+2. Click "Add Custom Connector"
+3. Enter connector details:
+   - **Name**: Bedrock Knowledge Base
+   - **Server URL**: `https://your-load-balancer-url/mcp` (or `https://your-load-balancer-url/sse`)
+4. Enter OAuth credentials:
+   - **Client ID**: Your `ENTRA_CLIENT_ID` from Azure AD App Registration
+   - **Client Secret**: The client secret you created in Azure AD
+5. Save and click "Configure" to start OAuth flow
+6. You'll be redirected to Azure AD login page
+7. Sign in with your Azure AD credentials
+8. Grant consent to the application
+9. After successful authentication, you'll be redirected back to Claude.ai
+10. Connection established with authenticated access
+
+**How it works:**
+- Your server acts as an OAuth2 proxy to Azure AD
+- Claude.ai automatically constructs OAuth URLs: `/authorize` and `/token`
+- Server's `/authorize` endpoint redirects users to Azure AD login
+- After authentication, Azure AD redirects to Claude.ai with authorization code
+- Server's `/token` endpoint exchanges codes for JWT access tokens from Azure AD
+- All subsequent MCP requests include the JWT bearer token
+- Server validates tokens using existing middleware
 
 ### Using the Server
 
@@ -308,6 +446,8 @@ docker-compose logs | grep ERROR
 
 ### Environment Variables
 
+#### AWS & Server Configuration
+
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `BEDROCK_KB_ID` | Yes | - | AWS Bedrock Knowledge Base ID |
@@ -316,16 +456,17 @@ docker-compose logs | grep ERROR
 | `SERVER_PORT` | No | `8000` | Server bind port |
 | `LOG_LEVEL` | No | `INFO` | Logging level (DEBUG, INFO, WARNING, ERROR) |
 
-### Future Authentication (Placeholder)
+#### Authentication Configuration
 
-The server includes placeholders for Entra SSO authentication:
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `ENABLE_AUTH` | No | `false` | Enable Microsoft Entra ID authentication |
+| `AUTH_PROVIDER` | No | `entra` | Authentication provider (currently only 'entra' supported) |
+| `ENTRA_TENANT_ID` | If auth enabled | - | Azure AD tenant ID (GUID) |
+| `ENTRA_CLIENT_ID` | If auth enabled | - | Azure AD application (client) ID (GUID) |
+| `ENTRA_AUDIENCE` | No | `ENTRA_CLIENT_ID` | Expected JWT audience claim (defaults to client ID) |
 
-```env
-ENABLE_AUTH=false
-AUTH_PROVIDER=entra
-ENTRA_TENANT_ID=your-tenant-id
-ENTRA_CLIENT_ID=your-client-id
-```
+**Note**: When `ENABLE_AUTH=true`, both `ENTRA_TENANT_ID` and `ENTRA_CLIENT_ID` must be set, or the server will fail to start with a validation error.
 
 ## Troubleshooting
 
@@ -335,6 +476,7 @@ ENTRA_CLIENT_ID=your-client-id
 2. Verify AWS credentials: `aws sts get-caller-identity`
 3. Check container logs: `docker-compose logs bedrock-mcp`
 4. Verify IAM role permissions
+5. **If auth enabled**: Verify `ENTRA_TENANT_ID` and `ENTRA_CLIENT_ID` are set
 
 ### Health check failing
 
@@ -342,6 +484,7 @@ ENTRA_CLIENT_ID=your-client-id
 2. Test local health: `curl http://localhost:8000/health`
 3. Check logs for errors: `docker-compose logs`
 4. Verify Bedrock KB ID is correct
+5. Note: Health endpoint always works without authentication
 
 ### Cannot retrieve from Knowledge Base
 
@@ -350,11 +493,76 @@ ENTRA_CLIENT_ID=your-client-id
 3. Verify Knowledge Base exists: `aws bedrock-agent list-knowledge-bases`
 4. Check logs for permission errors
 
+### Authentication issues
+
+#### Error: "ENTRA_TENANT_ID and ENTRA_CLIENT_ID are required when ENABLE_AUTH=true"
+
+- Solution: Set both `ENTRA_TENANT_ID` and `ENTRA_CLIENT_ID` in `.env` or disable auth with `ENABLE_AUTH=false`
+
+#### Error: "Failed to fetch signing keys from Azure AD"
+
+- Check internet connectivity from server to `login.microsoftonline.com`
+- Verify `ENTRA_TENANT_ID` is correct (must be a valid GUID)
+- Check server logs for detailed error message
+
+#### Error: "Token has expired" or "Token validation failed"
+
+- Claude.ai should automatically refresh tokens - this usually indicates a transient issue
+- Check that server system time is accurate (JWT validation is time-sensitive)
+- Verify Azure AD App Registration is still active and not disabled
+
+#### Error: "Token signed with unknown key ID"
+
+- Azure AD rotates signing keys periodically - wait for JWKS cache to refresh (1 hour max)
+- Restart server to force immediate cache refresh
+- Check Azure AD App Registration configuration
+
+#### Error: "Invalid token claims: audience"
+
+- Verify `ENTRA_CLIENT_ID` matches the Azure AD App Registration client ID
+- If using custom audience, set `ENTRA_AUDIENCE` to match token's `aud` claim
+- Check token contents: decode JWT at jwt.io (for debugging only)
+
+#### Authentication works locally but fails in production
+
+- Ensure `ENABLE_AUTH=true` is set in production `.env`
+- Verify all environment variables are properly set in docker-compose
+- Check that HTTPS is properly configured (JWT tokens should never be sent over HTTP)
+- Ensure Azure AD App Registration redirect URI matches Claude.ai callback URL
+
 ### ECR push/pull issues
 
 1. Verify ECR repository exists
 2. Check IAM role has ECR permissions
 3. Re-authenticate: `aws ecr get-login-password --region eu-west-1 | docker login --username AWS --password-stdin <ecr-uri>`
+
+### Testing Authentication Locally
+
+```bash
+# Test with auth disabled (default)
+ENABLE_AUTH=false python -m src
+curl http://localhost:8000/health  # Should work
+
+# Test with auth enabled (requires valid token)
+ENABLE_AUTH=true \
+ENTRA_TENANT_ID=your-tenant-id \
+ENTRA_CLIENT_ID=your-client-id \
+python -m src
+
+# Health endpoint should still work without token
+curl http://localhost:8000/health
+
+# Protected endpoints should return 401 without token
+curl http://localhost:8000/
+
+# Get token from Azure AD for testing
+az login
+TOKEN=$(az account get-access-token --resource your-client-id --query accessToken -o tsv)
+
+# Test with valid token
+curl http://localhost:8000/ \
+  -H "Authorization: Bearer $TOKEN"
+```
 
 ## Development
 
@@ -364,12 +572,14 @@ ENTRA_CLIENT_ID=your-client-id
 src/
 ├── __init__.py          # Package initialization
 ├── __main__.py          # Module entry point
-├── server.py            # FastMCP server with tools
+├── server.py            # FastMCP server with tools and auth middleware
 ├── bedrock_client.py    # Bedrock KB client wrapper
-└── config.py            # Pydantic settings
+├── config.py            # Pydantic settings with validation
+└── auth.py              # Microsoft Entra ID JWT validation
 
 tests/
-├── test_bedrock_client.py   # Unit tests for client
+├── test_bedrock_client.py   # Unit tests for Bedrock client
+├── test_auth.py             # Unit tests for authentication
 └── test_integration.py      # Integration tests
 ```
 
@@ -403,13 +613,19 @@ flake8 src/ tests/
 
 ## Security Considerations
 
-- No hardcoded credentials (uses IAM role)
-- HTTPS at load balancer level (SSL termination)
-- Security group limits application port to load balancer only
-- Container runs as non-root user
-- Minimal container image (Python slim)
-- Health endpoint doesn't expose sensitive data
-- CORS restricted to claude.ai domains
+- **No hardcoded credentials**: Uses IAM role for AWS access
+- **HTTPS required**: Always use HTTPS in production (SSL termination at load balancer)
+- **JWT token validation**: Cryptographic signature verification with RS256
+- **Token claims verification**: Validates issuer, audience, expiration, and not-before claims
+- **JWKS caching**: 1-hour cache reduces Azure AD API calls while maintaining security
+- **User identity logging**: Audit trail includes authenticated user (tokens never logged)
+- **Health endpoint exception**: `/health` accessible without auth for load balancer health checks
+- **Security group isolation**: Application port (8000) limited to load balancer only
+- **Container security**: Runs as non-root user with minimal image (Python slim)
+- **CORS restrictions**: Limited to claude.ai domains with credentials support
+- **Secrets management**: Never commit tenant/client IDs or secrets to version control
+- **OAuth client secret**: Managed by Claude.ai, not stored in server environment
+- **Backward compatible**: Auth disabled by default; opt-in for enterprise deployments
 
 ## License
 

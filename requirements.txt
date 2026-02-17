@@ -1,5 +1,5 @@
-# FastMCP - MCP server framework
-fastmcp>=0.4.0
+# FastMCP - MCP server framework (2.12.0+ for Pydantic 2.12+ compatibility)
+fastmcp>=2.12.0
 
 # FastAPI and web framework dependencies (explicitly included in case fastmcp doesn't bundle them)
 fastapi>=0.109.0
@@ -18,3 +18,10 @@ python-dotenv>=1.0.0
 
 # Structured logging
 structlog>=24.1.0
+
+# Microsoft Entra ID Authentication
+python-jose[cryptography]>=3.3.0
+PyJWT>=2.8.0
+cryptography>=42.0.0
+requests>=2.31.0
+python-multipart>=0.0.6  # For parsing OAuth2 form data in /token endpoint

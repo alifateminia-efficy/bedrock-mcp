@@ -11,6 +11,10 @@ services:
       - SERVER_HOST=0.0.0.0
       - SERVER_PORT=8000
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      # Authentication (Microsoft Entra ID)
+      - ENABLE_AUTH=${ENABLE_AUTH:-false}
+      - ENTRA_TENANT_ID=${ENTRA_TENANT_ID}
+      - ENTRA_CLIENT_ID=${ENTRA_CLIENT_ID}
     env_file:
       - .env
     healthcheck:
