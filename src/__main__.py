@@ -1,6 +1,6 @@
 """Entry point for running the Bedrock MCP server as a module."""
 
-from .server import mcp, logger, settings, configure_cors
+from .server import mcp, logger, settings, configure_cors, configure_auth_middleware
 
 if __name__ == "__main__":
     logger.info(
@@ -11,12 +11,15 @@ if __name__ == "__main__":
         region=settings.aws_region
     )
 
-    # Configure CORS if possible
+    # Configure middleware (CORS and Auth)
     try:
         if hasattr(mcp, 'app'):
             configure_cors(mcp.app)
+            configure_auth_middleware(mcp.app)
     except Exception as e:
-        logger.warning("cors_configuration_warning", error=str(e))
+        logger.warning("middleware_configuration_warning", error=str(e))
+        if settings.enable_auth:
+            raise
 
     # Run the server
     mcp.run(

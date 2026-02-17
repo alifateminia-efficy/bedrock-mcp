@@ -57,6 +57,11 @@ class Settings(BaseSettings):
         alias="ENTRA_CLIENT_ID",
         description="Microsoft Entra ID Client ID"
     )
+    entra_audience: str | None = Field(
+        default=None,
+        alias="ENTRA_AUDIENCE",
+        description="Microsoft Entra ID Token Audience (defaults to client_id)"
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -64,6 +69,14 @@ class Settings(BaseSettings):
         case_sensitive=False,
         extra="ignore"
     )
+
+    def model_post_init(self, __context):
+        """Validate configuration after initialization."""
+        if self.enable_auth:
+            if not self.entra_tenant_id or not self.entra_client_id:
+                raise ValueError(
+                    "ENTRA_TENANT_ID and ENTRA_CLIENT_ID are required when ENABLE_AUTH=true"
+                )
 
 
 # Global settings instance
